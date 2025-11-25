@@ -1,0 +1,29 @@
+name: Posílač obědů
+
+on:
+  schedule:
+    # Spustit každý všední den (Po-Pá) v 7:00 UTC (cca 8:00 našeho času)
+    - cron: '0 7 * * 1-5'
+  workflow_dispatch: # Tlačítko pro ruční spuštění testu
+
+jobs:
+  odeslat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stáhnout kód
+        uses: actions/checkout@v3
+
+      - name: Nastavit Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Instalovat knihovny
+        run: pip install -r requirements.txt
+
+      - name: Spustit skript
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+        run: python main.py
