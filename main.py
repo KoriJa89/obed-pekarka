@@ -19,7 +19,7 @@ EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER")
 def ziskej_menu():
     dnes = datetime.now()
     
-    # 1. Kontrola víkendu (5=sobota, 6=neděle)
+    # 1. Kontrola víkendu
     if dnes.weekday() > 4:
         print("Je víkend, agent dnes nepracuje.")
         return None
@@ -44,62 +44,58 @@ def ziskej_menu():
     denni_nabidka = []
     found = False
 
-    # Hledáme sekci s dnešním datem
     all_menus = soup.find_all('div', class_='menicka')
     
     for menu_div in all_menus:
         nadpis = menu_div.find('div', class_='nadpis')
         
-        # Pokud najdeme nadpis a v něm je dnešní datum
+        # Pokud najdeme sekci s dnešním datem
         if nadpis and dnes_str in nadpis.text:
             found = True
-            denni_nabidka.append(f"<h2 style='color:#d35400;'>📅 {nadpis.text.strip()}</h2>")
             
-            # --- POKUS 1: Standardní hledání (Polévka a Jídla) ---
-            polivka = menu_div.find(class_='polivka') # Hledáme jakýkoliv tag s touto třídou
-            jidla = menu_div.find_all(class_='jidlo') # Hledáme jakýkoliv tag s touto třídou
+            # --- NOVÁ STRATEGIE: Vytáhnout všechen text ---
+            # 1. Odstraníme nadpis z dat (abychom ho neměli v textu dvakrát, přidáme ho hezčí ručně)
+            datum_text = nadpis.text.strip()
             
-            # Pokud jsme našli strukturovaná jídla, naformátujeme je hezky
-            if jidla:
-                if polivka:
-                    denni_nabidka.append(f"<b>🍜 Polévka:</b> {polivka.text.strip()}<br>")
-                
-                denni_nabidka.append("<br><b>🍽️ Hlavní chody:</b><ul style='list-style-type: none; padding: 0;'>")
-                for j in jidla:
-                    cena = j.find(class_='cena')
-                    text_jidla = j.text.strip()
-                    
-                    if cena:
-                         cena_text = cena.text.strip()
-                         text_jidla = text_jidla.replace(cena_text, "").strip()
-                         denni_nabidka.append(f"<li style='margin-bottom: 8px;'>✅ {text_jidla} <b>({cena_text})</b></li>")
+            # 2. Vytáhneme veškerý text a nahradíme HTML tagy za odřádkování
+            # separator="<br>" zajistí, že každý div/p/br na webu bude nový řádek v mailu
+            obsah_html = menu_div.decode_contents()
+            
+            # Použijeme BeautifulSoup znovu jen na tento kousek, abychom ho vyčistili
+            menu_soup = BeautifulSoup(obsah_html, 'html.parser')
+            
+            # Najdeme všechny řádky textu
+            lines = []
+            
+            # Projdeme elementy a zkusíme zachovat strukturu
+            # Nejjednodušší je vzít prostý text s oddělovači
+            raw_text = menu_div.get_text(separator="|||")
+            
+            split_lines = raw_text.split("|||")
+            
+            denni_nabidka.append(f"<h2 style='color:#d35400; border-bottom: 2px solid #d35400; padding-bottom: 5px;'>📅 {datum_text}</h2>")
+            
+            denni_nabidka.append("<div style='font-size: 14px; line-height: 1.6;'>")
+            
+            for line in split_lines:
+                clean_line = line.strip()
+                # Vynecháme prázdné řádky a samotné datum (to už máme v nadpisu)
+                if clean_line and clean_line != datum_text:
+                    # Pokud řádek obsahuje cenu (číslo na konci), zvýrazníme ho
+                    if any(char.isdigit() for char in clean_line[-5:]): 
+                        denni_nabidka.append(f"<p style='margin: 8px 0;'>🍽️ {clean_line}</p>")
+                    # Pokud je to informace o rozvozu nebo polévka (bez ceny na konci)
                     else:
-                        denni_nabidka.append(f"<li style='margin-bottom: 8px;'>✅ {text_jidla}</li>")
-                denni_nabidka.append("</ul>")
+                        denni_nabidka.append(f"<p style='margin: 5px 0; color: #555;'><i>{clean_line}</i></p>")
             
-            # --- POKUS 2: Záchranná brzda (když selže struktura) ---
-            else:
-                print("POZOR: Nenašel jsem třídu 'jidlo', beru hrubý text.")
-                # Vezmeme veškerý text z divu
-                raw_text = menu_div.get_text(separator="\n")
-                # Odstraníme datum (nadpis), ať tam není 2x
-                if nadpis:
-                    raw_text = raw_text.replace(nadpis.text.strip(), "")
-                
-                # Vyčistíme prázdné řádky
-                lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
-                clean_text = "<br>".join(lines)
-                
-                denni_nabidka.append("<p><i>(Nepodařilo se načíst formátování, zde je hrubý výpis):</i></p>")
-                denni_nabidka.append(f"<p>{clean_text}</p>")
-                
+            denni_nabidka.append("</div>")
             break
 
     if not found:
         print("Menu pro dnešní den nebylo na stránce nalezeno.")
         return None
     
-    return "\n".join(denni_nabidka)
+    return "".join(denni_nabidka)
 
 def poslat_email(obsah):
     if not EMAIL_SENDER or not EMAIL_PASSWORD:
@@ -113,13 +109,12 @@ def poslat_email(obsah):
 
     html_text = f"""
     <html>
-      <body style="font-family: Arial, sans-serif; line-height: 1.6;">
-        <div style="background-color: #f9f9f9; padding: 20px; border-radius: 5px;">
-            <p>Ahoj, tady je dnešní nabídka z Bistra Pekařka:</p>
-            <hr>
+      <body style="font-family: Arial, sans-serif; max-width: 600px;">
+        <div style="background-color: #fcfcfc; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
             {obsah}
+            <br>
             <hr>
-            <p style="color: gray; font-size: 12px;">Odesláno automaticky GitHub agentem.</p>
+            <p style="color: gray; font-size: 11px; text-align: center;">Odesláno z GitHub Actions</p>
         </div>
       </body>
     </html>
