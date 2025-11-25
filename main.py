@@ -83,7 +83,7 @@ def ziskej_menu():
                 if clean_line and clean_line != datum_text:
                     # Pokud řádek obsahuje cenu (číslo na konci), zvýrazníme ho
                     if any(char.isdigit() for char in clean_line[-5:]): 
-                        denni_nabidka.append(f"<p style='margin: 8px 0;'>🍽️ {clean_line}</p>")
+                        denni_nabidka.append(f"<p style='margin: 8px 0;'>{clean_line}</p>")
                     # Pokud je to informace o rozvozu nebo polévka (bez ceny na konci)
                     else:
                         denni_nabidka.append(f"<p style='margin: 5px 0; color: #555;'><i>{clean_line}</i></p>")
