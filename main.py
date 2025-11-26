@@ -36,15 +36,6 @@ if FIREBASE_CREDENTIALS:
         print(f"❌ Chyba při připojování k Firebase: {e}")
 
 def ziskej_data():
-    """
-    Vrátí slovník s daty pro mail i pro databázi.
-    {
-        'found': True/False,
-        'email_html': '...',
-        'db_soup': '...',
-        'db_main': '...'
-    }
-    """
     dnes = datetime.now()
     
     # 1. Kontrola víkendu
@@ -78,48 +69,59 @@ def ziskej_data():
         if nadpis and dnes_str in nadpis.text:
             datum_text = nadpis.text.strip()
             
-            # --- ČÁST A: Extrakce čistých dat pro Firebase ---
-            # Menicka.cz má třídy .polievka a .jidlo, použijeme je pro čistá data
-            db_soup = ""
-            soup_el = menu_div.find(class_='polievka')
-            if soup_el:
-                db_soup = soup_el.text.strip()
-
-            db_mains = []
-            for jidlo_el in menu_div.find_all(class_='jidlo'):
-                txt = jidlo_el.text.strip()
-                if txt:
-                    db_mains.append(txt)
-            
-            db_main_str = "\n".join(db_mains) # Spojíme jídla odřádkováním
-
-            # --- ČÁST B: Příprava HTML pro Email (Tvoje původní logika) ---
-            # Vytvoříme hezké HTML pro mail
-            email_lines = []
-            
-            # Nadpis
-            email_lines.append(f"<h2 style='color:#d35400; border-bottom: 2px solid #d35400; padding-bottom: 5px;'>📅 {datum_text}</h2>")
-            email_lines.append("<div style='font-size: 14px; line-height: 1.6;'>")
-            
-            # Zpracování obsahu pro mail (zachování tvé logiky řádků)
+            # --- ZPRACOVÁNÍ TEXTU (Společné pro Mail i DB) ---
+            # Vytáhneme veškerý text a rozdělíme po řádcích
             obsah_html = menu_div.decode_contents()
-            # Vyčistíme HTML tagy a rozdělíme
             raw_text = BeautifulSoup(obsah_html, 'html.parser').get_text(separator="|||")
             split_lines = raw_text.split("|||")
             
+            # Připravíme si seznamy pro DB
+            db_soup = ""
+            db_mains_list = []
+            
+            # Připravíme si HTML pro Email
+            email_lines = []
+            email_lines.append(f"<h2 style='color:#d35400; border-bottom: 2px solid #d35400; padding-bottom: 5px;'>📅 {datum_text}</h2>")
+            email_lines.append("<div style='font-size: 14px; line-height: 1.6;'>")
+
             for line in split_lines:
                 clean_line = line.strip()
-                if clean_line and clean_line != datum_text:
-                    # Zvýraznění ceny
-                    if any(char.isdigit() for char in clean_line[-5:]): 
-                        email_lines.append(f"<p style='margin: 8px 0;'>{clean_line}</p>")
+                
+                # Přeskočíme prázdné řádky a samotné datum
+                if not clean_line or clean_line == datum_text:
+                    continue
+                
+                # Zjišťujeme, jestli řádek obsahuje cenu (číslo na konci)
+                has_price = any(char.isdigit() for char in clean_line[-5:])
+                
+                # --- LOGIKA PRO DATABÁZI ---
+                if has_price:
+                    # Pokud ještě nemáme polévku a řádek vypadá jako polévka (často levnější nebo první)
+                    # Ale pozor, někdy je polévka v samostatném tagu. Zkusíme ji najít bezpečněji.
+                    is_likely_soup = "polévka" in clean_line.lower() or "vývar" in clean_line.lower() or "kyselo" in clean_line.lower() or "krém" in clean_line.lower()
+                    
+                    if not db_soup and is_likely_soup:
+                        db_soup = clean_line
+                    elif not db_soup and len(db_mains_list) == 0 and "..." in clean_line: 
+                         # Fallback: Pokud je to první položka s cenou a nemáme polévku, bereme to jako polévku
+                         db_soup = clean_line
                     else:
-                        email_lines.append(f"<p style='margin: 5px 0; color: #555;'><i>{clean_line}</i></p>")
+                        # Vše ostatní s cenou je hlavní jídlo
+                        db_mains_list.append(clean_line)
+
+                # --- LOGIKA PRO EMAIL ---
+                if has_price: 
+                    email_lines.append(f"<p style='margin: 8px 0;'>{clean_line}</p>")
+                else:
+                    email_lines.append(f"<p style='margin: 5px 0; color: #555;'><i>{clean_line}</i></p>")
             
             email_lines.append("</div>")
             email_html = "".join(email_lines)
+            
+            # Spojíme hlavní jídla do textu
+            db_main_str = "\n".join(db_mains_list)
 
-            # Vrátíme kompletní balíček dat
+            # Vrátíme kompletní balíček
             return {
                 'found': True,
                 'email_html': email_html,
@@ -132,7 +134,7 @@ def ziskej_data():
 
 def poslat_email(obsah_html):
     if not EMAIL_SENDER or not EMAIL_PASSWORD:
-        print("⚠️ Hesla pro email nejsou nastavena, přeskakuji odesílání.")
+        print("⚠️ Hesla pro email nejsou nastavena.")
         return
 
     msg = MIMEMultipart()
@@ -164,10 +166,10 @@ def poslat_email(obsah_html):
 
 def ulozit_do_firebase(polievka, jidlo):
     if not db:
-        print("⚠️ Firebase není připojeno, přeskakuji ukládání.")
+        print("⚠️ Firebase není připojeno.")
         return
 
-    today_id = datetime.now().strftime('%Y-%m-%d') # ID dokumentu např. 2023-11-26
+    today_id = datetime.now().strftime('%Y-%m-%d')
     
     data = {
         'date': today_id,
@@ -177,9 +179,10 @@ def ulozit_do_firebase(polievka, jidlo):
     }
 
     try:
-        # Uložíme do kolekce 'daily_menus' pod ID dnešního dne
         db.collection('daily_menus').document(today_id).set(data)
         print("✅ Menu úspěšně uloženo do Firebase databáze!")
+        print(f"   Polévka: {polievka}")
+        print(f"   Jídlo: {jidlo[:50]}...")
     except Exception as e:
         print(f"❌ Chyba při zápisu do Firebase: {e}")
 
@@ -187,10 +190,7 @@ if __name__ == "__main__":
     vysledek = ziskej_data()
     
     if vysledek and vysledek['found']:
-        # 1. Poslat E-mail
         poslat_email(vysledek['email_html'])
-        
-        # 2. Uložit do Databáze (pro webovou aplikaci)
         ulozit_do_firebase(vysledek['db_soup'], vysledek['db_main'])
     else:
         print("Dnes se nic neposílá ani neukládá.")
