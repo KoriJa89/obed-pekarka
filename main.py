@@ -7,16 +7,44 @@ from datetime import datetime
 import holidays
 import os
 import sys
+import json
+
+# --- FIREBASE IMPORTY ---
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
 
 # --- NASTAVENÍ ---
 URL = "https://www.menicka.cz/4125-bistro-pekarka.html"
 
-# Načtení hesel
+# Načtení proměnných prostředí
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER")
+FIREBASE_CREDENTIALS = os.environ.get("FIREBASE_CREDENTIALS")
 
-def ziskej_menu():
+# --- INICIALIZACE FIREBASE ---
+db = None
+if FIREBASE_CREDENTIALS:
+    try:
+        cred_dict = json.loads(FIREBASE_CREDENTIALS)
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        print("✅ Připojeno k Firebase.")
+    except Exception as e:
+        print(f"❌ Chyba při připojování k Firebase: {e}")
+
+def ziskej_data():
+    """
+    Vrátí slovník s daty pro mail i pro databázi.
+    {
+        'found': True/False,
+        'email_html': '...',
+        'db_soup': '...',
+        'db_main': '...'
+    }
+    """
     dnes = datetime.now()
     
     # 1. Kontrola víkendu
@@ -36,70 +64,75 @@ def ziskej_menu():
     try:
         response = requests.get(URL)
         response.encoding = 'windows-1250'
-        soup = BeautifulSoup(response.text, 'html.parser')
+        soup_html = BeautifulSoup(response.text, 'html.parser')
     except Exception as e:
         print(f"Chyba při stahování webu: {e}")
         return None
 
-    denni_nabidka = []
-    found = False
-
-    all_menus = soup.find_all('div', class_='menicka')
+    all_menus = soup_html.find_all('div', class_='menicka')
     
     for menu_div in all_menus:
         nadpis = menu_div.find('div', class_='nadpis')
         
         # Pokud najdeme sekci s dnešním datem
         if nadpis and dnes_str in nadpis.text:
-            found = True
-            
-            # --- NOVÁ STRATEGIE: Vytáhnout všechen text ---
-            # 1. Odstraníme nadpis z dat (abychom ho neměli v textu dvakrát, přidáme ho hezčí ručně)
             datum_text = nadpis.text.strip()
             
-            # 2. Vytáhneme veškerý text a nahradíme HTML tagy za odřádkování
-            # separator="<br>" zajistí, že každý div/p/br na webu bude nový řádek v mailu
+            # --- ČÁST A: Extrakce čistých dat pro Firebase ---
+            # Menicka.cz má třídy .polievka a .jidlo, použijeme je pro čistá data
+            db_soup = ""
+            soup_el = menu_div.find(class_='polievka')
+            if soup_el:
+                db_soup = soup_el.text.strip()
+
+            db_mains = []
+            for jidlo_el in menu_div.find_all(class_='jidlo'):
+                txt = jidlo_el.text.strip()
+                if txt:
+                    db_mains.append(txt)
+            
+            db_main_str = "\n".join(db_mains) # Spojíme jídla odřádkováním
+
+            # --- ČÁST B: Příprava HTML pro Email (Tvoje původní logika) ---
+            # Vytvoříme hezké HTML pro mail
+            email_lines = []
+            
+            # Nadpis
+            email_lines.append(f"<h2 style='color:#d35400; border-bottom: 2px solid #d35400; padding-bottom: 5px;'>📅 {datum_text}</h2>")
+            email_lines.append("<div style='font-size: 14px; line-height: 1.6;'>")
+            
+            # Zpracování obsahu pro mail (zachování tvé logiky řádků)
             obsah_html = menu_div.decode_contents()
-            
-            # Použijeme BeautifulSoup znovu jen na tento kousek, abychom ho vyčistili
-            menu_soup = BeautifulSoup(obsah_html, 'html.parser')
-            
-            # Najdeme všechny řádky textu
-            lines = []
-            
-            # Projdeme elementy a zkusíme zachovat strukturu
-            # Nejjednodušší je vzít prostý text s oddělovači
-            raw_text = menu_div.get_text(separator="|||")
-            
+            # Vyčistíme HTML tagy a rozdělíme
+            raw_text = BeautifulSoup(obsah_html, 'html.parser').get_text(separator="|||")
             split_lines = raw_text.split("|||")
-            
-            denni_nabidka.append(f"<h2 style='color:#d35400; border-bottom: 2px solid #d35400; padding-bottom: 5px;'>📅 {datum_text}</h2>")
-            
-            denni_nabidka.append("<div style='font-size: 14px; line-height: 1.6;'>")
             
             for line in split_lines:
                 clean_line = line.strip()
-                # Vynecháme prázdné řádky a samotné datum (to už máme v nadpisu)
                 if clean_line and clean_line != datum_text:
-                    # Pokud řádek obsahuje cenu (číslo na konci), zvýrazníme ho
+                    # Zvýraznění ceny
                     if any(char.isdigit() for char in clean_line[-5:]): 
-                        denni_nabidka.append(f"<p style='margin: 8px 0;'>{clean_line}</p>")
-                    # Pokud je to informace o rozvozu nebo polévka (bez ceny na konci)
+                        email_lines.append(f"<p style='margin: 8px 0;'>{clean_line}</p>")
                     else:
-                        denni_nabidka.append(f"<p style='margin: 5px 0; color: #555;'><i>{clean_line}</i></p>")
+                        email_lines.append(f"<p style='margin: 5px 0; color: #555;'><i>{clean_line}</i></p>")
             
-            denni_nabidka.append("</div>")
-            break
+            email_lines.append("</div>")
+            email_html = "".join(email_lines)
 
-    if not found:
-        print("Menu pro dnešní den nebylo na stránce nalezeno.")
-        return None
-    
-    return "".join(denni_nabidka)
+            # Vrátíme kompletní balíček dat
+            return {
+                'found': True,
+                'email_html': email_html,
+                'db_soup': db_soup,
+                'db_main': db_main_str
+            }
 
-def poslat_email(obsah):
+    print("Menu pro dnešní den nebylo na stránce nalezeno.")
+    return None
+
+def poslat_email(obsah_html):
     if not EMAIL_SENDER or not EMAIL_PASSWORD:
-        print("CHYBA: Nejsou nastavena hesla (Secrets) v GitHubu!")
+        print("⚠️ Hesla pro email nejsou nastavena, přeskakuji odesílání.")
         return
 
     msg = MIMEMultipart()
@@ -111,7 +144,7 @@ def poslat_email(obsah):
     <html>
       <body style="font-family: Arial, sans-serif; max-width: 600px;">
         <div style="background-color: #fcfcfc; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
-            {obsah}
+            {obsah_html}
             <br>
             <hr>
             <p style="color: gray; font-size: 11px; text-align: center;">Odesláno z GitHub Actions</p>
@@ -128,11 +161,36 @@ def poslat_email(obsah):
         print("✅ E-mail byl úspěšně odeslán!")
     except Exception as e:
         print(f"❌ Chyba při odesílání e-mailu: {e}")
-        sys.exit(1)
+
+def ulozit_do_firebase(polievka, jidlo):
+    if not db:
+        print("⚠️ Firebase není připojeno, přeskakuji ukládání.")
+        return
+
+    today_id = datetime.now().strftime('%Y-%m-%d') # ID dokumentu např. 2023-11-26
+    
+    data = {
+        'date': today_id,
+        'soup': polievka,
+        'mainDish': jidlo,
+        'updatedAt': firestore.SERVER_TIMESTAMP
+    }
+
+    try:
+        # Uložíme do kolekce 'daily_menus' pod ID dnešního dne
+        db.collection('daily_menus').document(today_id).set(data)
+        print("✅ Menu úspěšně uloženo do Firebase databáze!")
+    except Exception as e:
+        print(f"❌ Chyba při zápisu do Firebase: {e}")
 
 if __name__ == "__main__":
-    menu = ziskej_menu()
-    if menu:
-        poslat_email(menu)
+    vysledek = ziskej_data()
+    
+    if vysledek and vysledek['found']:
+        # 1. Poslat E-mail
+        poslat_email(vysledek['email_html'])
+        
+        # 2. Uložit do Databáze (pro webovou aplikaci)
+        ulozit_do_firebase(vysledek['db_soup'], vysledek['db_main'])
     else:
-        print("Dnes se nic neposílá.")
+        print("Dnes se nic neposílá ani neukládá.")
